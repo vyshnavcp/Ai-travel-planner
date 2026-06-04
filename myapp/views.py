@@ -1,6 +1,7 @@
 from django.shortcuts import render
 from django.http import StreamingHttpResponse
 from django.core.cache import cache
+from .models import TravelPlan
 import ollama
 import markdown
 import hashlib
@@ -19,34 +20,6 @@ Include:
 # Travel Tips
 
 Use markdown headings and bullet points. Be concise."""
-
-
-def generate_itinerary(destination, budget, days, travel_type):
-
-    cache_key = hashlib.md5(
-        f"{destination}{budget}{days}{travel_type}".encode()
-    ).hexdigest()
-
-    cached = cache.get(cache_key)
-    if cached:
-        return cached, True
-
-    try:
-        response = ollama.chat(
-            model="llama3.2:3b",
-            messages=[
-                {
-                    "role": "user",
-                    "content": build_prompt(destination, budget, days, travel_type)
-                }
-            ]
-        )
-        result = response["message"]["content"]
-        cache.set(cache_key, result, timeout=60 * 60 * 6)
-        return result, False
-
-    except Exception as e:
-        return f"# Error\n\n{str(e)}", False
 
 
 def stream_itinerary(destination, budget, days, travel_type):
@@ -77,20 +50,29 @@ def stream_itinerary(destination, budget, days, travel_type):
         ):
             token = chunk["message"]["content"]
             full_response += token
-            yield f"data:{token}\n\n"
+            html = markdown.markdown(full_response)
+            yield f"data:{html}\n\n"
+
+        TravelPlan.objects.create(
+            destination=destination,
+            budget=budget,
+            days=days,
+            travel_type=travel_type,
+            itinerary=full_response
+        )
 
         cache.set(cache_key, full_response, timeout=60 * 60 * 6)
 
     except Exception as e:
-        yield f"data:Error: {str(e)}\n\n"
+        yield f"data:<p class='error-box'>Error: {str(e)}</p>\n\n"
 
 
 def travel_planner(request):
 
     if request.method == "POST":
         destination = request.POST.get("destination", "").strip()
-        budget = request.POST.get("budget", "").strip()
-        days = request.POST.get("days", "").strip()
+        budget      = request.POST.get("budget", "").strip()
+        days        = request.POST.get("days", "").strip()
         travel_type = request.POST.get("travel_type", "").strip()
 
         if not all([destination, budget, days, travel_type]):
@@ -98,11 +80,8 @@ def travel_planner(request):
                 "error": "Please fill in all fields."
             })
 
-        def event_stream():
-            yield from stream_itinerary(destination, budget, days, travel_type)
-
         return StreamingHttpResponse(
-            event_stream(),
+            stream_itinerary(destination, budget, days, travel_type),
             content_type="text/event-stream"
         )
 
